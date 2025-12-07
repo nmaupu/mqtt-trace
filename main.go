@@ -26,84 +26,69 @@ type Config struct {
 	OutputFile string `mapstructure:"output_file"`
 }
 
-// MessageRecord represents a single message record in the output file
-type MessageRecord struct {
-	Date    string                 `json:"date"`
-	Payload map[string]interface{} `json:"payload"`
-}
-
-// MessageStore manages the collection of messages
-type MessageStore struct {
-	mu       sync.RWMutex
-	messages []MessageRecord
+// FileWriter handles writing messages to the output file
+type FileWriter struct {
+	mu       sync.Mutex
 	filePath string
 }
 
-// NewMessageStore creates a new message store
-func NewMessageStore(filePath string) *MessageStore {
-	return &MessageStore{
-		messages: make([]MessageRecord, 0),
+// NewFileWriter creates a new file writer
+func NewFileWriter(filePath string) *FileWriter {
+	return &FileWriter{
 		filePath: filePath,
 	}
 }
 
-// AddMessage adds a new message to the store and saves to file
-func (ms *MessageStore) AddMessage(payload map[string]interface{}) error {
-	ms.mu.Lock()
-	defer ms.mu.Unlock()
+// WriteMessage appends a message to the output file in the format: <date>|name=<name>|rssi=<rssi>
+func (fw *FileWriter) WriteMessage(payload map[string]any) error {
+	fw.mu.Lock()
+	defer fw.mu.Unlock()
 
-	// Filter payload to only include rssi and name fields
-	filteredPayload := make(map[string]interface{})
-	if rssi, ok := payload["rssi"]; ok {
-		filteredPayload["rssi"] = rssi
-	}
-	if name, ok := payload["name"]; ok {
-		filteredPayload["name"] = name
-	}
-
-	record := MessageRecord{
-		Date:    time.Now().Format(time.RFC3339),
-		Payload: filteredPayload,
-	}
-
-	ms.messages = append(ms.messages, record)
-
-	// Save to file
-	return ms.saveToFile()
-}
-
-// saveToFile writes all messages to the JSON file
-func (ms *MessageStore) saveToFile() error {
-	file, err := os.Create(ms.filePath)
+	// Open file in append mode, create if it doesn't exist
+	file, err := os.OpenFile(fw.filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		return fmt.Errorf("failed to create output file: %w", err)
+		return fmt.Errorf("failed to open output file: %w", err)
 	}
 	defer file.Close()
 
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(ms.messages); err != nil {
-		return fmt.Errorf("failed to encode JSON: %w", err)
+	// Build the output line: <date>|name=<name>|rssi=<rssi>
+	date := time.Now().Format(time.RFC3339)
+	line := date
+
+	// Add name if present
+	if name, ok := payload["name"]; ok {
+		line += fmt.Sprintf("|name=%v", name)
+	}
+
+	// Add rssi if present
+	if rssi, ok := payload["rssi"]; ok {
+		line += fmt.Sprintf("|rssi=%v", rssi)
+	}
+
+	// Write line with newline
+	line += "\n"
+	if _, err := file.WriteString(line); err != nil {
+		return fmt.Errorf("failed to write to file: %w", err)
 	}
 
 	return nil
 }
 
 // messageHandler handles incoming MQTT messages
-func messageHandler(store *MessageStore) mqtt.MessageHandler {
+func messageHandler(writer *FileWriter) mqtt.MessageHandler {
 	return func(client mqtt.Client, msg mqtt.Message) {
-		var payload map[string]interface{}
+		var payload map[string]any
 		if err := json.Unmarshal(msg.Payload(), &payload); err != nil {
 			log.Printf("Error unmarshaling message from topic %s: %v", msg.Topic(), err)
 			return
 		}
 
-		if err := store.AddMessage(payload); err != nil {
+		if err := writer.WriteMessage(payload); err != nil {
 			log.Printf("Error saving message: %v", err)
 			return
 		}
 
-		log.Printf("Received message on topic %s: %+v", msg.Topic(), payload)
+		log.Printf("Received message on topic %s", msg.Topic())
 	}
 }
 
@@ -114,7 +99,7 @@ func loadConfig(configPath string) (*Config, error) {
 
 	// Set defaults
 	viper.SetDefault("mqtt.port", 1883)
-	viper.SetDefault("output_file", "mqtt-trace.json")
+	viper.SetDefault("output_file", "mqtt-trace.log")
 
 	if err := viper.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
@@ -153,8 +138,8 @@ func main() {
 	log.Printf("Output file: %s", config.OutputFile)
 	log.Printf("Subscribing to %d topics", len(config.MQTT.Topics))
 
-	// Create message store
-	store := NewMessageStore(config.OutputFile)
+	// Create file writer
+	writer := NewFileWriter(config.OutputFile)
 
 	// Setup MQTT client options
 	opts := mqtt.NewClientOptions()
@@ -167,7 +152,7 @@ func main() {
 	opts.SetConnectRetryInterval(5 * time.Second)
 
 	// Set default message handler
-	opts.SetDefaultPublishHandler(messageHandler(store))
+	opts.SetDefaultPublishHandler(messageHandler(writer))
 
 	// Create and start MQTT client
 	client := mqtt.NewClient(opts)
@@ -179,7 +164,7 @@ func main() {
 
 	// Subscribe to all topics
 	for _, topic := range config.MQTT.Topics {
-		if token := client.Subscribe(topic, 0, messageHandler(store)); token.Wait() && token.Error() != nil {
+		if token := client.Subscribe(topic, 0, messageHandler(writer)); token.Wait() && token.Error() != nil {
 			log.Fatalf("Failed to subscribe to topic %s: %v", topic, token.Error())
 		}
 		log.Printf("Subscribed to topic: %s", topic)
@@ -195,5 +180,4 @@ func main() {
 	log.Println("Shutting down...")
 	client.Disconnect(250)
 	log.Println("Disconnected from MQTT broker")
-	log.Printf("Total messages recorded: %d", len(store.messages))
 }

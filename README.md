@@ -11,8 +11,9 @@ This tool subscribes to MQTT topics and records the timestamp of each received m
 - **MQTT Subscription**: Subscribe to multiple MQTT topics simultaneously
 - **Timestamp Tracking**: Records the exact time (RFC3339 format) when each message is received
 - **Payload Filtering**: Extracts only relevant fields (`rssi` and `name`) from incoming messages
-- **JSON Output**: Saves all records in a structured JSON format
+- **Line-based Output**: Saves records in a simple, append-only line format for efficient processing
 - **Real-time Updates**: Output file is updated immediately upon receiving each message
+- **Memory Efficient**: No in-memory storage - messages are written directly to disk
 - **Graceful Shutdown**: Handles interrupt signals (Ctrl+C) cleanly
 
 ## Requirements
@@ -54,7 +55,7 @@ This tool subscribes to MQTT topics and records the timestamp of each received m
        - "+/+/BTtoMQTT/A4C138DBBC6F"  # Topic pattern for sensor 1
        - "+/+/BTtoMQTT/A4C138C3A050"  # Topic pattern for sensor 2
    
-   output_file: "mqtt-trace.json"    # Output JSON file path
+   output_file: "mqtt-trace.log"    # Output log file path
    ```
 
 ### Topic Patterns for Xiaomi LYSD03MMC
@@ -94,61 +95,80 @@ The application will:
 1. Connect to the MQTT broker
 2. Subscribe to all configured topics
 3. Start logging received messages
-4. Save messages to the output JSON file in real-time
+4. Save messages to the output log file in real-time (one line per message)
 
-Press `Ctrl+C` to stop the application gracefully. The program will disconnect from the MQTT broker and display the total number of messages recorded.
+Press `Ctrl+C` to stop the application gracefully. The program will disconnect from the MQTT broker.
 
 ## Output Format
 
-The output JSON file contains an array of message records. Each record includes:
+The output log file uses a simple line-based format. Each message is written as a single line appended to the file:
 
-- **`date`**: ISO 8601 timestamp (RFC3339) when the message was received
-- **`payload`**: Filtered payload containing only `rssi` and `name` fields (if present in the original message)
-
-Example output (`mqtt-trace.json`):
-
-```json
-[
-  {
-    "date": "2024-01-15T10:30:45Z",
-    "payload": {
-      "rssi": -65,
-      "name": "LYSD03MMC"
-    }
-  },
-  {
-    "date": "2024-01-15T10:31:15Z",
-    "payload": {
-      "rssi": -67,
-      "name": "LYSD03MMC"
-    }
-  }
-]
 ```
+<date>|name=<name>|rssi=<rssi>
+```
+
+Where:
+- **`date`**: ISO 8601 timestamp (RFC3339) when the message was received
+- **`name`**: Device name (only included if present in the message)
+- **`rssi`**: Signal strength (only included if present in the message)
+
+Example output (`mqtt-trace.log`):
+
+```
+2024-01-15T10:30:45Z|name=LYSD03MMC|rssi=-65
+2024-01-15T10:31:15Z|name=LYSD03MMC|rssi=-67
+2024-01-15T10:31:45Z|name=LYSD03MMC|rssi=-66
+```
+
+**Note**: If `name` or `rssi` fields are not present in the message, they will be omitted from the output line. The file is appended to, so it grows over time without truncation.
 
 ## Analyzing Intervals
 
-To analyze the intervals between messages, you can:
-
-1. Use the timestamps in the `date` field to calculate time differences
-2. Import the JSON file into a data analysis tool (Python pandas, Excel, etc.)
-3. Write a simple script to parse the JSON and compute intervals
-
-Example Python snippet to calculate intervals:
+To analyze the intervals between messages, you can parse the log file line by line. Here's an example Python script:
 
 ```python
-import json
+import re
 from datetime import datetime
 
-with open('mqtt-trace.json') as f:
-    records = json.load(f)
+def parse_log_line(line):
+    """Parse a log line: <date>|name=<name>|rssi=<rssi>"""
+    parts = line.strip().split('|')
+    if not parts:
+        return None
+    
+    date_str = parts[0]
+    name = None
+    rssi = None
+    
+    for part in parts[1:]:
+        if part.startswith('name='):
+            name = part[5:]
+        elif part.startswith('rssi='):
+            rssi = part[5:]
+    
+    try:
+        date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+        return {'date': date, 'name': name, 'rssi': rssi}
+    except:
+        return None
 
+# Read and parse the log file
+records = []
+with open('mqtt-trace.log') as f:
+    for line in f:
+        record = parse_log_line(line)
+        if record:
+            records.append(record)
+
+# Calculate intervals
 for i in range(1, len(records)):
-    prev_time = datetime.fromisoformat(records[i-1]['date'].replace('Z', '+00:00'))
-    curr_time = datetime.fromisoformat(records[i]['date'].replace('Z', '+00:00'))
+    prev_time = records[i-1]['date']
+    curr_time = records[i]['date']
     interval = (curr_time - prev_time).total_seconds()
-    print(f"Interval: {interval} seconds")
+    print(f"Interval: {interval} seconds (RSSI: {records[i]['rssi']})")
 ```
+
+You can also use command-line tools like `awk` or `grep` to process the log file, or import it into data analysis tools that support line-delimited formats.
 
 ## About Xiaomi LYSD03MMC
 
@@ -160,7 +180,7 @@ The Xiaomi LYSD03MMC is a Bluetooth Low Energy (BLE) temperature and humidity se
 
 ## Compatibility
 
-While designed for Xiaomi LYSD03MMC sensors, this tool works with any MQTT device that publishes JSON payloads. The payload filtering will extract `rssi` and `name` fields if they exist in the message, otherwise the payload will be empty.
+While designed for Xiaomi LYSD03MMC sensors, this tool works with any MQTT device that publishes JSON payloads. The payload filtering will extract `rssi` and `name` fields if they exist in the message. If a field is not present, it will simply be omitted from the output line.
 
 ## License
 
