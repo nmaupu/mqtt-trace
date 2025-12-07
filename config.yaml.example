@@ -1,0 +1,10 @@
+mqtt:
+  broker: localhost
+  port: 1883
+  username: username
+  password: password
+  topics:
+    - "+/+/BTtoMQTT/A4C138DBBC6F"
+    - "+/+/BTtoMQTT/A4C138C3A050"
+
+output_file: "mqtt-trace.json"
